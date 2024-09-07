@@ -1,0 +1,110 @@
+{%- macro json_to_python_type(json_spec) %}
+    {%- set basic_type_map = {
+    "string": "str",
+    "number": "float",
+    "integer": "int",
+    "boolean": "bool"
+} %}
+
+    {%- if basic_type_map[json_spec.type] is defined %}
+        {{- basic_type_map[json_spec.type] }}
+    {%- elif json_spec.type == "array" %}
+        {{- "list[" +  json_to_python_type(json_spec|items) + "]" }}
+    {%- elif json_spec.type == "object" %}
+        {%- if json_spec.additionalProperties is defined %}
+            {{- "dict[str, " + json_to_python_type(json_spec.additionalProperties) + ']' }}
+        {%- else %}
+            {{- "dict" }}
+        {%- endif %}
+    {%- elif json_spec.type is iterable %}
+        {{- "Union[" }}
+        {%- for t in json_spec.type %}
+            {{- json_to_python_type({"type": t}) }}
+            {%- if not loop.last %}
+                {{- "," }}
+            {%- endif %}
+        {%- endfor %}
+        {{- "]" }}
+    {%- else %}
+        {{- "Any" }}
+    {%- endif %}
+{%- endmacro %}
+
+{%- if messages[0]["role"] == "system" %}
+    {%- set system_message = messages[0]["content"]|trim %}
+    {%- set loop_messages = messages[1:] %}
+{%- else %}
+    {%- set loop_messages = messages %}
+{%- endif %}
+
+{%- if not tools is defined %}
+    {%- set tools = none %}
+{%- endif %}
+
+{%- set user_messages = loop_messages | selectattr("role", "equalto", "user") | list %}
+
+{%- for message in loop_messages | rejectattr("role", "equalto", "tool") | rejectattr("role", "equalto", "tool_results") | selectattr("tool_calls", "undefined") %}
+    {%- if (message["role"] == "user") != (loop.index0 % 2 == 0) %}
+        {{- raise_exception("After the optional system message, conversation roles must alternate user/assistant/user/assistant/...") }}
+    {%- endif %}
+{%- endfor %}
+
+{{- "<|begin_of_text|>" }}
+
+{%- if system_message is defined %}
+    {{- "<|start_header_id|>system<|end_header_id|>\n\n" }}
+    {{- "Cutting Knowledge Date: December 2023\n" }}
+    {{- "Today Date: 26 Jul 2024\n\n" }}
+    {%- if tools is not none %}
+        {{- "Environment: ipython\n" }}
+        {{- "Tools: " + tools|join(", ") + "\n\n" }}
+    {%- endif %}
+    {{- system_message }}
+    {{- "<|eot_id|>" }}
+{%- endif %}
+
+{%- for message in loop_messages %}
+    {%- if message["role"] == "user" %}
+        {{- "<|start_header_id|>user<|end_header_id|>\n\n" }}
+        {{- message["content"] }}
+        {{- "<|eot_id|>" }}
+    {%- elif message["role"] == "assistant" %}
+        {{- "<|start_header_id|>assistant<|end_header_id|>\n\n" }}
+        {%- if message.get("tool_calls") %}
+            {%- for tool_call in message["tool_calls"] %}
+                {%- if tools is not none and tool_call["function"]["name"] in tools %}
+                    {{- "<|python_tag|>" }}
+                    {{- tool_call["function"]["name"] + ".call(" }}
+                    {%- for arg_name, arg_val in tool_call["function"]["arguments"]|items %}
+                        {{- arg_name + '="' + arg_val + '"' }}
+                        {%- if not loop.last %}
+                            {{- ", " }}
+                        {%- endif %}
+                    {%- endfor %}
+                    {{- ")" }}
+                    {{- "<|eom_id|>" }}
+                {%- else %}
+                    {{- '{"name": "' + tool_call["function"]["name"] + '", ' }}
+                    {{- '"parameters": ' + tool_call["function"]["arguments"]|tojson }}
+                    {{- "}" }}
+                    {{- "<|eot_id|>" }}
+                {%- endif %}
+            {%- endfor %}
+        {%- else %}
+            {{- message["content"] }}
+            {{- "<|eot_id|>" }}
+        {%- endif %}
+    {%- elif message["role"] == "tool" or message["role"] == "ipython" %}
+        {{- "<|start_header_id|>ipython<|end_header_id|>\n\n" }}
+        {%- if message["content"] is mapping or message["content"] is iterable %}
+            {{- message["content"]|tojson }}
+        {%- else %}
+            {{- message["content"] }}
+        {%- endif %}
+        {{- "<|eot_id|>" }}
+    {%- endif %}
+{%- endfor %}
+
+{%- if add_generation_prompt %}
+    {{- "<|start_header_id|>assistant<|end_header_id|>\n\n" }}
+{%- endif %}
